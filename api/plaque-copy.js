@@ -49,7 +49,7 @@ export default async function handler(req, res) {
   model: "gpt-4o-mini",
   input: prompt,
   text: {
-    format: "json"
+    format: { type: "json_object" }
   }
 }),
     });
