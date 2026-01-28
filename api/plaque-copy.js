@@ -46,11 +46,12 @@ export default async function handler(req, res) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
-        // ✅ 가능하면 JSON 출력 모드 강제 (지원되는 계정/모델이면 더 안정적)
-        response_format: { type: "json_object" },
-        input: prompt,
-      }),
+  model: "gpt-4o-mini",
+  input: prompt,
+  text: {
+    format: "json"
+  }
+}),
     });
 
     if (!r.ok) {
