@@ -66,9 +66,9 @@ const prompt = `
 
 [출력 JSON 형식]
 {
-  "polite": "100~120자 본문",
-  "emotional": "100~120자 본문",
-  "witty": "100~120자 본문",
+  "polite": "220~240자 본문",
+  "emotional": "220~240자 본문",
+  "witty": "220~240자 본문",
   "sign": "올림 또는 드림"
 }
 `.trim();
