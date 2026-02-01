@@ -130,6 +130,11 @@ const prompt = `
       });
     }
 
+    // ✅ 본문 앞 공백/줄바꿈 제거 (근본 해결)
+parsed.polite = (parsed.polite || "").replace(/^[\s\uFEFF\xA0]+/, "");
+parsed.emotional = (parsed.emotional || "").replace(/^[\s\uFEFF\xA0]+/, "");
+parsed.witty = (parsed.witty || "").replace(/^[\s\uFEFF\xA0]+/, "");
+
     return res.status(200).json(parsed);
   } catch (e) {
     return res.status(500).json({ error: "서버 오류", detail: String(e) });
