@@ -8,13 +8,19 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
   try {
-    const { occasion, to, message, date, from } = req.body || {};
+    const {
+      occasion, to, message, date, from,
+      mode, avoid_text, variant
+    } = req.body || {};
+
     if (!occasion || !to || !message) {
       return res.status(400).json({ error: "occasion/to/message는 필수입니다." });
     }
 
-    // ✅ 프롬프트 강화: 코드블록 금지 / JSON만
-const prompt = `
+    const isOccasionOne = mode === "occasion_one";
+
+    // ✅ 프롬프트
+    const prompt = isOccasionOne ? `
 너는 감사패/상패 문구를 전문으로 작성하는 한국어 카피라이터다.
 아래의 '상황'은 문체와 의미를 결정하는 핵심 조건이다.
 모든 내용은 한국어로만 작성하고 외래어 작성은 무조건 금지
@@ -41,9 +47,59 @@ const prompt = `
 
 [본문 작성 규칙]
 - 본문은 반드시 "받는 분의 이름이나 호칭을 부르지 말고" 시작할 것
-  (예: 김OO님, 부장님, 선생님, 여사님 등으로 시작 금지)
 - 본문은 설명문 형태로 자연스럽게 시작할 것
-  (예: "오랜 시간 동안 보여주신 헌신과 책임감에 깊은 감사를 전합니다."처럼)
+- 본문은 상황을 이해하고 작성할 것
+- 본문은 한국어 기준 220~240자 분량으로 작성
+- 너무 짧게 작성하지 말 것 (220자 미만 금지)
+
+[중복 방지 - 매우 중요]
+- 이번 요청은 "상황 추천 ${variant || 1}번" 문장이다.
+${avoid_text ? `- 아래 문장과 표현/구성/문장 시작부가 겹치지 않게 새롭게 작성하라:\n${avoid_text}` : `- 이전 문구와 겹치지 않게 새롭게 작성하라.`}
+
+[절대 금지]
+- 머리말, 제목, 설명, 마크다운, 코드블록
+- JSON 외 텍스트 출력
+
+[입력 정보]
+상황: ${occasion}
+받는 분: ${to}
+핵심 메시지 요약: ${message}
+날짜: ${date || "미기재"}
+보내는 분: ${from || "미기재"}
+
+[출력 JSON 형식]
+{
+  "body": "220~240자 본문"
+}
+`.trim()
+: `
+너는 감사패/상패 문구를 전문으로 작성하는 한국어 카피라이터다.
+아래의 '상황'은 문체와 의미를 결정하는 핵심 조건이다.
+모든 내용은 한국어로만 작성하고 외래어 작성은 무조건 금지
+
+[상황 해석 규칙 - 매우 중요]
+- 상황이 "생신/환갑/칠순"인 경우:
+  - 단순한 생일 축하 문구처럼 쓰지 말 것
+  - 반드시 아래 의미 중 2가지 이상을 본문에 반영할 것
+    1) 긴 세월과 인생의 시간
+    2) 가족과 주변에 남긴 삶의 흔적
+    3) 존경, 헌정, 감사의 감정
+    4) 앞으로의 축복은 '새 출발'이 아닌 '평안과 건강'의 의미
+  - 가볍거나 캐주얼한 표현 금지
+  - 청춘/새 출발/모험 같은 단어 사용 금지
+
+- 상황이 "퇴직/정년"인 경우:
+  - 수고, 헌신, 책임, 조직 기여를 중심으로 작성
+
+- 상황이 "공로/감사"인 경우:
+  - 성과보다 태도, 영향력, 신뢰를 강조
+
+- 상황이 "기념/창립"인 경우:
+  - 시간의 축적, 성장, 공동의 여정을 강조
+
+[본문 작성 규칙]
+- 본문은 반드시 "받는 분의 이름이나 호칭을 부르지 말고" 시작할 것
+- 본문은 설명문 형태로 자연스럽게 시작할 것
 - 본문은 상황을 이해하고 작성할 것
 - 각 본문은 한국어 기준 220~240자 분량으로 작성
 - 너무 짧게 작성하지 말 것 (220자 미만 금지)
@@ -77,8 +133,6 @@ const prompt = `
 }
 `.trim();
 
-
-
     const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
@@ -86,12 +140,10 @@ const prompt = `
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-  model: "gpt-4o-mini",
-  input: prompt,
-  text: {
-    format: { type: "json_object" }
-  }
-}),
+        model: "gpt-4o-mini",
+        input: prompt,
+        text: { format: { type: "json_object" } }
+      }),
     });
 
     if (!r.ok) {
@@ -110,33 +162,36 @@ const prompt = `
     // ✅ 1차: 코드블록 제거
     let cleaned = rawText.trim();
     cleaned = cleaned
-      .replace(/^```(?:json)?\s*/i, "")  // 시작 ```json 제거
-      .replace(/```$/i, "")              // 끝 ``` 제거
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/```$/i, "")
       .trim();
 
-    // ✅ 2차: 그래도 앞뒤에 잡텍스트가 있으면 { ... }만 추출
+    // ✅ 2차: { ... }만 추출
     if (!(cleaned.startsWith("{") && cleaned.endsWith("}"))) {
       const m = cleaned.match(/\{[\s\S]*\}/);
       if (m) cleaned = m[0];
     }
 
-    // ✅ 최종 파싱
     const parsed = JSON.parse(cleaned);
 
-    // 키가 없으면(가끔 모델이 다르게 뱉는 경우) 에러 처리
-    if (!parsed?.polite || !parsed?.emotional || !parsed?.witty) {
-      return res.status(500).json({
-        error: "응답 JSON 키가 예상과 다릅니다.",
-        detail: cleaned,
-      });
+    // ✅ 키 체크
+    if (isOccasionOne) {
+      if (!parsed?.body) {
+        return res.status(500).json({ error: "응답 JSON 키가 예상과 다릅니다.", detail: cleaned });
+      }
+      parsed.body = (parsed.body || "").replace(/^[\s\uFEFF\xA0]+/, "");
+      return res.status(200).json(parsed);
+    } else {
+      if (!parsed?.polite || !parsed?.emotional || !parsed?.witty) {
+        return res.status(500).json({ error: "응답 JSON 키가 예상과 다릅니다.", detail: cleaned });
+      }
+      // ✅ 본문 앞 공백/줄바꿈 제거
+      parsed.polite = (parsed.polite || "").replace(/^[\s\uFEFF\xA0]+/, "");
+      parsed.emotional = (parsed.emotional || "").replace(/^[\s\uFEFF\xA0]+/, "");
+      parsed.witty = (parsed.witty || "").replace(/^[\s\uFEFF\xA0]+/, "");
+      return res.status(200).json(parsed);
     }
 
-    // ✅ 본문 앞 공백/줄바꿈 제거 (근본 해결)
-parsed.polite = (parsed.polite || "").replace(/^[\s\uFEFF\xA0]+/, "");
-parsed.emotional = (parsed.emotional || "").replace(/^[\s\uFEFF\xA0]+/, "");
-parsed.witty = (parsed.witty || "").replace(/^[\s\uFEFF\xA0]+/, "");
-
-    return res.status(200).json(parsed);
   } catch (e) {
     return res.status(500).json({ error: "서버 오류", detail: String(e) });
   }
