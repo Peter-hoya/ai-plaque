@@ -26,6 +26,68 @@ export default async function handler(req, res) {
       return "산뜻하고 센스 있는 어투 (가볍지만 예의 유지)";
     };
 
+    // ✅ (추가) 선행공백 제거
+    const stripLeading = (s) => (s ?? "").replace(/^[\s\uFEFF\xA0]+/, "");
+
+    // ✅ (추가) 영문/외국어 감지
+    function hasForeign(s) {
+      if (!s) return false;
+
+      // 1) 알파벳이 있으면 무조건 외국어로 판단
+      if (/[A-Za-z]/.test(s)) return true;
+
+      // 2) 허용 문자(한글/자모/숫자/공백/기본문장부호) 외가 있으면 외국어로 판단
+      //    - 영어 외에도, 라틴확장/키릴/중국어/일본어/이모지 등이 걸러짐
+      const allowed = /^[\uAC00-\uD7A3\u1100-\u11FF\u3130-\u318F0-9\s.,!?'"()\-[\]{}~·…:;/%&+=<>@#^_|\\\n\r]+$/;
+      return !allowed.test(s);
+    }
+
+    // ✅ OpenAI 호출 함수(재시도용)
+    async function callOpenAI(prompt) {
+      const r = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          input: prompt,
+          text: { format: { type: "json_object" } }
+        }),
+      });
+
+      if (!r.ok) {
+        const detail = await r.text();
+        throw new Error(detail);
+      }
+      return await r.json();
+    }
+
+    // ✅ 응답 텍스트(JSON) 파싱 함수
+    function parseJsonFromResponsesAPI(data) {
+      const rawText =
+        data?.output?.[0]?.content?.find?.((c) => c.type === "output_text")?.text ??
+        data?.output_text ??
+        "";
+
+      let cleaned = rawText.trim();
+      cleaned = cleaned
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/```$/i, "")
+        .trim();
+
+      if (!(cleaned.startsWith("{") && cleaned.endsWith("}"))) {
+        const m = cleaned.match(/\{[\s\S]*\}/);
+        if (m) cleaned = m[0];
+      }
+
+      return { cleaned, parsed: JSON.parse(cleaned) };
+    }
+
+    // =========================
+    // 프롬프트 구성(너가 준 그대로)
+    // =========================
     const prompt = isToneOne ? `
 너는 감사패/상패 문구를 전문으로 작성하는 한국어 카피라이터다.
 아래의 '상황'은 문체와 의미를 결정하는 핵심 조건이다.
@@ -52,7 +114,6 @@ export default async function handler(req, res) {
 - 본문은 상황을 이해하고 작성할 것
 - 본문은 한국어 기준 220~240자 분량으로 작성 (220자 미만 금지)
 
-
 [추가 생성 규칙 - 매우 중요]
 - 이번 요청은 기존 문구의 "추가 버전"이다.
 - 아래 문장과 표현/구성/문장 시작부가 겹치지 않게 완전히 새롭게 작성하라:
@@ -65,6 +126,11 @@ ${toneDef(tone)}
 [절대 금지]
 - 머리말, 제목, 설명, 마크다운, 코드블록
 - JSON 외 텍스트 출력
+
+[언어 규칙 - 최상위]
+- 출력 본문은 100% 한국어로만 구성한다.
+- 영문 알파벳(A-Z, a-z), 숫자+영문 조합, 외국어(한글이 아닌 문자)가 1글자라도 포함되면 즉시 실패다.
+- 부득이하게 약어/영문이 필요한 경우에도 한글로 풀어서 쓰고, 알파벳 사용 금지.
 
 [입력 정보]
 상황: ${occasion}
@@ -118,6 +184,11 @@ ${toneDef(tone)}
 - 머리말, 제목, 설명, 마크다운, 코드블록
 - JSON 외 텍스트 출력
 
+[언어 규칙 - 최상위]
+- 출력 본문은 100% 한국어로만 구성한다.
+- 영문 알파벳(A-Z, a-z), 숫자+영문 조합, 외국어(한글이 아닌 문자)가 1글자라도 포함되면 즉시 실패다.
+- 부득이하게 약어/영문이 필요한 경우에도 한글로 풀어서 쓰고, 알파벳 사용 금지.
+
 [입력 정보]
 상황: ${occasion}
 받는 분: ${to}
@@ -134,59 +205,72 @@ ${toneDef(tone)}
 }
 `.trim();
 
-    const r = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        input: prompt,
-        text: { format: { type: "json_object" } }
-      }),
-    });
+    // =========================
+    // ✅ 1~2회 재시도 포함 호출
+    // =========================
+    const MAX_TRIES = 3; // 최초 1 + 재시도 2 = 총 3번
+    let lastCleaned = "";
+    let parsed = null;
 
-    if (!r.ok) {
-      const detail = await r.text();
-      return res.status(500).json({ error: "OpenAI 호출 실패", detail });
+    for (let i = 1; i <= MAX_TRIES; i++) {
+      const extraWarn = i === 1 ? "" : `
+
+[재시도 경고 - 매우 중요]
+- 이전 출력에 영문/외국어가 포함되어 실패했다.
+- 이번 출력은 한글 외 문자가 1글자라도 포함되면 즉시 실패다.
+- 반드시 100% 한글만 사용해서 다시 작성하라.
+`;
+
+      const data = await callOpenAI(prompt + extraWarn);
+      const result = parseJsonFromResponsesAPI(data);
+      lastCleaned = result.cleaned;
+      parsed = result.parsed;
+
+      // 기본 키 검증 + 공백 정리
+      if (isToneOne) {
+        if (!parsed?.body) continue;
+        parsed.body = stripLeading(parsed.body);
+        const bad = hasForeign(parsed.body);
+        if (!bad) break; // ✅ 통과
+      } else {
+        if (!parsed?.polite || !parsed?.emotional || !parsed?.witty) continue;
+        parsed.polite = stripLeading(parsed.polite);
+        parsed.emotional = stripLeading(parsed.emotional);
+        parsed.witty = stripLeading(parsed.witty);
+        parsed.sign = stripLeading(parsed.sign || "");
+        const bad = [parsed.polite, parsed.emotional, parsed.witty].some(hasForeign);
+        if (!bad) break; // ✅ 통과
+      }
+
+      // 루프가 끝까지 가면 아래에서 에러 처리
     }
 
-    const data = await r.json();
-
-    const rawText =
-      data?.output?.[0]?.content?.find?.((c) => c.type === "output_text")?.text ??
-      data?.output_text ??
-      "";
-
-    let cleaned = rawText.trim();
-    cleaned = cleaned
-      .replace(/^```(?:json)?\s*/i, "")
-      .replace(/```$/i, "")
-      .trim();
-
-    if (!(cleaned.startsWith("{") && cleaned.endsWith("}"))) {
-      const m = cleaned.match(/\{[\s\S]*\}/);
-      if (m) cleaned = m[0];
-    }
-
-    const parsed = JSON.parse(cleaned);
-
+    // =========================
+    // 최종 검증 (재시도 후에도 실패면 에러)
+    // =========================
     if (isToneOne) {
       if (!parsed?.body) {
-        return res.status(500).json({ error: "응답 JSON 키가 예상과 다릅니다.", detail: cleaned });
+        return res.status(500).json({ error: "응답 JSON 키가 예상과 다릅니다.", detail: lastCleaned });
       }
-      parsed.body = (parsed.body || "").replace(/^[\s\uFEFF\xA0]+/, "");
+      if (hasForeign(parsed.body)) {
+        return res.status(500).json({
+          error: "외국어/영문 포함으로 생성 실패(재시도 후)",
+          detail: parsed.body
+        });
+      }
       return res.status(200).json(parsed);
     }
 
     if (!parsed?.polite || !parsed?.emotional || !parsed?.witty) {
-      return res.status(500).json({ error: "응답 JSON 키가 예상과 다릅니다.", detail: cleaned });
+      return res.status(500).json({ error: "응답 JSON 키가 예상과 다릅니다.", detail: lastCleaned });
     }
 
-    parsed.polite = (parsed.polite || "").replace(/^[\s\uFEFF\xA0]+/, "");
-    parsed.emotional = (parsed.emotional || "").replace(/^[\s\uFEFF\xA0]+/, "");
-    parsed.witty = (parsed.witty || "").replace(/^[\s\uFEFF\xA0]+/, "");
+    if ([parsed.polite, parsed.emotional, parsed.witty].some(hasForeign)) {
+      return res.status(500).json({
+        error: "외국어/영문 포함으로 생성 실패(재시도 후)",
+        detail: parsed
+      });
+    }
 
     return res.status(200).json(parsed);
 
