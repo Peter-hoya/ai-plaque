@@ -1,5 +1,5 @@
 export default async function handler(req, res) {
-  // CORS 설정
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -19,65 +19,59 @@ export default async function handler(req, res) {
 
     const isToneOne = mode === "tone_one";
 
-    // 1. 톤 정의
+    // ✅ 톤 정의
     const toneDef = (t) => {
       if (t === "polite") return "격식 있고 헌정문에 가까운 어투";
       if (t === "emotional") return "따뜻하지만 가볍지 않은 어투";
       return "산뜻하고 센스 있는 어투 (가볍지만 예의 유지)";
     };
 
-    // 2. 기본 문자열 정리
+    // ✅ 기본 문자열 정리
     const stripLeading = (s) => (s ?? "").replace(/^[\s\uFEFF\xA0]+/, "");
 
-    // ✅ [핵심 수정 1] 앞부분(수신자/호칭) 강제 제거 함수
+    // ✅ [수정됨] 앞부분 클리너 (너무 과도하게 자르지 않도록 완화)
     const cleanHead = (text) => {
       if (!text) return "";
       let cleaned = text.trim();
 
-      // (1) "To.", "받는 사람:", "수신:" 같은 헤더 제거
+      // 1. 명백한 "To." "받는사람:" 같은 라벨만 제거
+      // 문장 속의 이름은 건드리지 않음 (문맥 파괴 방지)
       cleaned = cleaned.replace(/^(To|Dear|To\.|받는\s?사람|받는\s?분|수신)[:.]?\s*/i, "");
 
-      // (2) 입력받은 'to'(받는 사람 이름)가 문장 처음에 있다면 제거
-      if (to) {
-        // 특수문자 이스케이프
-        const safeTo = to.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        // 패턴: (시작) + (공백?) + 이름 + (호칭/조사?) + (쉼표/마침표/줄바꿈?)
-        // 예: "홍길동 부장님," 또는 "홍길동 귀하" 로 시작하면 제거
-        const toRegex = new RegExp(`^\\s*${safeTo}\\s*(님|부장|과장|팀장|대표|사장|이사|선생|여사|귀하|에게|께)?\\s*[,.]?\\s*`, 'i');
-        cleaned = cleaned.replace(toRegex, "");
+      // 2. "귀하"가 단독으로 덩그러니 있는 경우만 제거
+      if (cleaned.startsWith("귀하")) {
+         // "귀하의 노고에" -> 유지 / "귀하, 지난 시간..." -> 제거
+         if (/^귀하\s*[,.]\s*/.test(cleaned)) {
+            cleaned = cleaned.replace(/^귀하\s*[,.]\s*/, "");
+         }
       }
-
-      // (3) "귀하" 단독으로 시작하는 경우 제거 (예: "귀하의 노고에...")
-      // 단, "귀하의" 처럼 문장 구성요소면 놔두고, "귀하," 처럼 호칭이면 제거
-      cleaned = cleaned.replace(/^귀하\s*[,.]\s*/, "");
 
       return cleaned.trim();
     };
 
-    // ✅ [핵심 수정 2] 뒷부분(발신자/날짜) 강제 제거 함수
+    // ✅ 뒷부분 클리너 (날짜/서명은 여전히 제거)
     const cleanTail = (text) => {
       if (!text) return "";
       let cleaned = text;
 
-      // (1) 보내는 사람 이름 제거
+      // 1. 보내는 사람 이름 제거
       if (from) {
         const safeFrom = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // 이름 뒤에 '드림/올림' 등이 있거나 문장이 끝나는 경우
         const fromRegex = new RegExp(`\\s*${safeFrom}\\s*(드림|올림|배상)?\\.?$`);
         cleaned = cleaned.replace(fromRegex, "");
       }
 
-      // (2) 날짜 패턴 제거
+      // 2. 날짜 패턴 제거
       const dateRegex = /\s*\d{4}[.\-년]\s*\d{1,2}[.\-월]\s*\d{1,2}[일]?\.?$/;
       cleaned = cleaned.replace(dateRegex, "");
       
       return cleaned.trim();
     };
 
-    // 통합 클리너 (앞뒤 다 자름)
     const cleanText = (text) => cleanTail(cleanHead(stripLeading(text)));
 
-
-    // 3. 영문/외국어 감지
+    // ✅ 외국어 감지
     function hasForeign(s) {
       if (!s) return false;
       if (/[A-Za-z]/.test(s)) return true;
@@ -85,7 +79,7 @@ export default async function handler(req, res) {
       return !allowed.test(s);
     }
 
-    // 4. OpenAI 호출
+    // ✅ OpenAI 호출
     async function callOpenAI(prompt) {
       const r = await fetch("https://api.openai.com/v1/responses", {
         method: "POST",
@@ -107,7 +101,6 @@ export default async function handler(req, res) {
       return await r.json();
     }
 
-    // 5. JSON 파싱
     function parseJsonFromResponsesAPI(data) {
       const rawText =
         data?.output?.[0]?.content?.find?.((c) => c.type === "output_text")?.text ??
@@ -128,33 +121,38 @@ export default async function handler(req, res) {
     }
 
     // =========================
-    // ✅ 프롬프트 수정 (시작 금지 규칙 강화)
+    // ✅ 프롬프트 수정 (자연스러운 시작 유도)
     // =========================
     const commonRules = `
-[상황 해석 규칙]
-- 상황이 "생신/환갑/칠순"인 경우: 인생의 무게, 존경, 평안, 가족의 감사 강조 (단순 생일 축하 지양)
-- 상황이 "퇴직/정년"인 경우: 헌신, 명예로운 마무리, 새로운 시작 응원
-- 상황이 "공로/감사"인 경우: 구체적인 기여, 태도, 신뢰 강조
-- 상황이 "기념/창립"인 경우: 역사, 성장, 함께한 시간 강조
+[상황 해석 및 작성 가이드]
+- 상황이 "생신/환갑/칠순"인 경우: 인생의 무게와 존경심을 담아 따뜻하게
+- 상황이 "퇴직/정년"인 경우: 그동안의 노고를 치하하고 명예로운 마무리를 강조
+- 상황이 "공로/감사"인 경우: 구체적인 헌신과 태도에 대한 감사
 
-[작성 금지 규칙 - 위반 시 실패]
-1. **절대 'To', '받는 사람', '${to}'(이름/호칭), '귀하'로 문장을 시작하지 마라.**
-   - 편지 형식이 아니라 '상패 본문'만 필요하다.
-   - 예시(X): "홍길동 부장님, 지난 30년간..."
-   - 예시(O): "지난 30년간 보여주신 헌신에 깊이 감사드립니다..."
-2. **절대 본문 끝에 '날짜'나 '보내는 사람(${from})'을 적지 마라.**
-   - 디자인 시 하단에 별도로 들어간다. 중복 표기 금지.
-3. 한국어 220~240자 내외.
-4. 존댓말 사용.
+[작성 규칙 - 매우 중요]
+1. **문장 시작 방법**:
+   - 받는 사람의 이름을 부르며 시작하지 마십시오. (촌스러움 방지)
+   - 대신 **"계절/시간의 흐름", "감사의 마음", "업적에 대한 수식어"**로 자연스럽게 문장을 여십시오.
+   - 예시(O): "지난 30년이라는 긴 시간 동안..."
+   - 예시(O): "언제나 든든한 버팀목이 되어주신..."
+   - 예시(X): "홍길동 부장님, 지난 30년간..." (이름 부르기 금지)
+
+2. **문장 끝맺음**:
+   - 본문 내용만 작성하십시오.
+   - **날짜와 보내는 사람(서명)은 절대 적지 마십시오.** (디자인 템플릿에 자동 삽입됩니다)
+
+3. **형식**:
+   - 한국어 220~240자 내외의 줄글 형태.
+   - 존댓말(하십시오체, 해요체 등 톤에 맞게) 사용.
 `;
 
     const prompt = isToneOne ? `
-너는 상패 문구 전문 카피라이터다. 한국어로만 작성하라.
+너는 상패 문구 전문 카피라이터다.
 
 ${commonRules}
 
 [추가 요청]
-- 기존 문구의 '추가 버전'이다. 아래 내용과 겹치지 않게 작성:
+- 기존 문구의 '추가 버전'이다. 아래 내용과 겹치지 않게 완전히 새롭게 작성하라:
 ${avoid_text || "(없음)"}
 
 [톤]
@@ -169,17 +167,17 @@ ${avoid_text || "(없음)"}
 { "body": "본문" }
 `.trim()
 : `
-너는 상패 문구 전문 카피라이터다. 한국어로만 작성하라.
+너는 상패 문구 전문 카피라이터다.
 
 ${commonRules}
 
 [톤 정의]
 - polite: 격식, 헌정문 스타일
 - emotional: 감성적, 따뜻함
-- witty: 센스, 위트, 산뜻함 (가벼움 주의)
+- witty: 센스, 위트, 산뜻함
 
-[서명 처리]
-- "올림" 또는 "드림" 중 하나를 'sign' 필드에만 넣고, 본문에는 넣지 마라.
+[서명 필드 처리]
+- "올림" 또는 "드림" 중 하나를 'sign' 필드에만 담고, 본문에는 절대 넣지 마라.
 
 [입력 정보]
 상황: ${occasion}
@@ -196,7 +194,7 @@ ${commonRules}
 `.trim();
 
     // =========================
-    // ✅ 실행 및 재시도 루프
+    // ✅ 실행 및 재시도
     // =========================
     const MAX_TRIES = 3;
     let lastCleaned = "";
@@ -204,28 +202,23 @@ ${commonRules}
 
     for (let i = 1; i <= MAX_TRIES; i++) {
       const extraWarn = i === 1 ? "" : `
-[경고]
-- 이전 출력에 금지된 문자(영어)나 형식이 포함되었습니다.
-- '받는 사람 이름'으로 시작하지 말고, 바로 내용부터 시작하세요.
-- 한글만 사용하세요.
+[재시도]
+- 이전 출력에 영어가 포함되었거나 형식이 올바르지 않았습니다.
+- 반드시 한글로만 작성하고, 이름을 부르며 시작하지 마세요.
 `;
       const data = await callOpenAI(prompt + extraWarn);
       const result = parseJsonFromResponsesAPI(data);
       lastCleaned = result.cleaned;
       parsed = result.parsed;
 
-      // 검증 및 후처리 (CleanHead + CleanTail 적용)
+      // 후처리
       if (isToneOne) {
         if (!parsed?.body) continue;
-        
-        // ✨ 앞뒤 자르기 적용
         parsed.body = cleanText(parsed.body);
-        
         if (!hasForeign(parsed.body)) break; 
       } else {
         if (!parsed?.polite || !parsed?.emotional || !parsed?.witty) continue;
         
-        // ✨ 앞뒤 자르기 적용
         parsed.polite = cleanText(parsed.polite);
         parsed.emotional = cleanText(parsed.emotional);
         parsed.witty = cleanText(parsed.witty);
@@ -236,14 +229,11 @@ ${commonRules}
       }
     }
 
-    // =========================
-    // ✅ 최종 응답
-    // =========================
+    // 최종 응답
     if (isToneOne) {
       if (!parsed?.body) return res.status(500).json({ error: "생성 실패", detail: lastCleaned });
       return res.status(200).json(parsed);
     }
-
     if (!parsed?.polite) return res.status(500).json({ error: "생성 실패", detail: lastCleaned });
     
     return res.status(200).json(parsed);
