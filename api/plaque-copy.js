@@ -144,6 +144,9 @@ export default async function handler(req, res) {
 3. **형식**:
    - 한국어 220~240자 내외의 줄글 형태.
    - 존댓말(하십시오체, 해요체 등 톤에 맞게) 사용.
+
+4. **호칭**:
+   - 받는 사람을 지칭해야한다면, "귀하"로 사용할 것
 `;
 
     const prompt = isToneOne ? `
